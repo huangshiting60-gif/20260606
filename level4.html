@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>第四關：3D 粒子視覺系統</title>
+  <link rel="icon" href="data:," />
+  <style>
+    body { margin: 0; overflow: hidden; background-color: #050505; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    #webgl-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+    #ui-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+    
+    .panel { pointer-events: auto; background: rgba(15, 15, 20, 0.65); padding: 20px; border-radius: 12px; border: 1px solid rgba(0, 200, 255, 0.3); backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+    
+    #bottom-left { position: absolute; left: 25px; bottom: 25px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+
+    /* 手勢退出區域 (移至右下角方便碰觸) */
+    #btn-exit { position: absolute; right: 25px; bottom: 25px; width: 220px; padding: 25px; font-size: 18px; text-align: center; color: #ff4444; border-color: rgba(255, 68, 68, 0.5); font-weight: bold; letter-spacing: 1px; }
+    #exit-progress { width: 100%; height: 10px; background: rgba(255, 255, 255, 0.1); margin-top: 12px; border-radius: 5px; overflow: hidden; }
+    #exit-bar { width: 0%; height: 100%; background: #ff4444; transition: width 0.1s; }
+
+    label { font-size: 13px; color: #aaa; margin-bottom: 4px; display: block; }
+    
+    video { width: 240px; border-radius: 8px; transform: scaleX(-1); border: 2px solid rgba(0, 200, 255, 0.5); }
+    
+    /* 新增：手勢虛擬游標 */
+    #hand-cursor { position: absolute; width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 200, 255, 0.4); border: 2px solid #0cf; pointer-events: none; z-index: 100; transform: translate(-50%, -50%); transition: background 0.2s, border-color 0.2s, transform 0.1s; box-shadow: 0 0 15px rgba(0, 200, 255, 0.5); }
+    .pinching { background: rgba(255, 50, 50, 0.8) !important; border-color: #ff4444 !important; transform: translate(-50%, -50%) scale(0.6) !important; box-shadow: 0 0 20px rgba(255, 50, 50, 0.8) !important; }
+
+    /* --- 手機版 UI 自適應放大 --- */
+    @media screen and (max-width: 850px) and (orientation: landscape) {
+      .panel { transform: scale(1.15); }
+      #bottom-left { transform-origin: bottom left; }
+      #btn-exit { transform-origin: bottom right; }
+    }
+
+    /* --- 螢幕翻轉提示 (行動裝置直立時顯示) --- */
+    #orientation-warning {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background-color: rgba(10, 15, 30, 0.95);
+      color: #00c8ff;
+      z-index: 9999;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      backdrop-filter: blur(10px);
+    }
+    #orientation-warning .phone-icon {
+      font-size: 60px;
+      margin-bottom: 20px;
+      animation: rotatePhone 1.5s infinite ease-in-out alternate;
+    }
+    #orientation-warning p {
+      font-size: 24px;
+      font-weight: bold;
+      margin: 0;
+      line-height: 1.5;
+    }
+    @keyframes rotatePhone {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(-90deg); }
+    }
+    @media screen and (orientation: portrait) and (max-width: 768px) {
+      #orientation-warning {
+        display: flex;
+      }
+    }
+  </style>
+  
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <!-- 手機直向提示 -->
+  <div id="orientation-warning">
+    <div class="phone-icon">📱</div>
+    <p>請將手機轉為橫向<br>以獲得最佳遊玩體驗</p>
+  </div>
+
+  <div id="webgl-container"></div>
+  
+  <!-- 虛擬手勢游標 -->
+  <div id="hand-cursor"></div>
+
+  <div id="ui-container">
+    <div id="btn-exit" class="panel">
+      完成挑戰並結算<br><span style="font-size:13px; color:#aaa; font-weight:normal;">將游標移至此處並捏合</span>
+      <div id="exit-progress"><div id="exit-bar"></div></div>
+    </div>
+
+    <div id="bottom-left" class="panel">
+      <label>實時手部追蹤 (MediaPipe)</label>
+      <video id="input-video" autoplay playsinline></video>
+      <label style="color: #0cf; font-size: 11px; margin-top: 5px;">左右移動：切換形狀與視角<br>捏合張開：控制模型縮放</label>
+      <label id="audio-hint" style="color: #ffaa00; font-size: 11px; margin-top: 5px; cursor: pointer;">🔊 點擊畫面任一處播放音樂</label>
+    </div>
+  </div>
+
+  <!-- Three.js ES Modules Import Map -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+    // --- 全域變數 ---
+    let scene, camera, renderer, composer, bloomPass;
+    let particleSystem, bgParticleSystem;
+    
+    // --- 新增：音頻視覺化 (Web Audio API) 變數 ---
+    let audioCtx, analyser, dataArray;
+    let audioScale = 1.0;
+    let isAudioVizInitialized = false;
+    
+    // 動態變形所需變數
+    let particleCount = 20000; // 固定粒子數以利於變形
+    let posNebula, posFireworks, posSaturn, posBlackhole, posHelix, posCube;
+    
+    let baseColor = new THREE.Color(0x00ccff);
+    
+    // 互動控制變數
+    let targetRotation = { x: 0, y: 0 };
+    let targetScale = 1.0;
+    let currentRotation = { x: 0, y: 0 };
+    let currentScale = 1.0;
+    
+    // 手勢退出計時器
+    let exitTimer = 0;
+    const cursor = document.getElementById('hand-cursor');
+    const btnExit = document.getElementById('btn-exit');
+    const exitBar = document.getElementById('exit-bar');
+
+    // --- 背景音樂設定 ---
+    const bgMusic = new Audio('4.mp3');
+    bgMusic.loop = true;
+    bgMusic.volume = 0.4; // 預設音量
+
+    // --- 新增：音頻視覺化初始化函數 ---
+    function initAudioVisualizer() {
+      if (isAudioVizInitialized) return;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaElementSource(bgMusic);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256; // 取樣大小
+        source.connect(analyser);
+        analyser.connect(audioCtx.destination);
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        isAudioVizInitialized = true;
+      } catch (e) {
+        console.warn("音頻視覺化初始化失敗", e);
+      }
+    }
+
+    // 嘗試自動播放 (部分瀏覽器基於安全性限制可能會阻擋)
+    bgMusic.play().then(() => {
+      document.getElementById('audio-hint').innerText = "🔊 音樂播放中 (點擊畫面可暫停)";
+      initAudioVisualizer();
+    }).catch(e => {
+      console.warn("自動播放被瀏覽器阻擋，需等待使用者點擊解鎖", e);
+      document.getElementById('audio-hint').innerText = "🔊 點擊畫面任一處播放音樂";
+    });
+
+    // 瀏覽器安全性限制：必須透過使用者互動 (點擊或觸控畫面) 才能播放音訊
+    const unlockAudio = () => {
+      initAudioVisualizer();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+      if (bgMusic.paused) {
+        bgMusic.play().catch(e => console.warn("音樂播放失敗", e));
+        document.getElementById('audio-hint').innerText = "🔊 音樂播放中 (點擊畫面可暫停)";
+      } else {
+        bgMusic.pause();
+        document.getElementById('audio-hint').innerText = "🔊 已暫停 (點擊畫面可播放)";
+      }
+    };
+
+    window.addEventListener('click', unlockAudio);
+    window.addEventListener('touchstart', unlockAudio, { passive: false });
+
+    // --- 初始化 Three.js ---
+    function initThreeJS() {
+      const container = document.getElementById('webgl-container');
+      scene = new THREE.Scene();
+      // 加入一點深空霧效
+      scene.fog = new THREE.FogExp2(0x050505, 0.001);
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 2000);
+      camera.position.z = 400;
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      container.appendChild(renderer.domElement);
+
+      // --- 設置特效合成器 (Bloom 輝光) ---
+      const renderScene = new RenderPass(scene, camera);
+      // 適度降低輝光強度與半徑，並提高發光門檻，避免大量粒子疊加時暈染成一坨
+      bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.2);
+      
+      composer = new EffectComposer(renderer);
+      composer.addPass(renderScene);
+      composer.addPass(bloomPass);
+
+      // 生成深空背景粒子
+      createBackground();
+      // 生成主模型
+      initParticleShapes();
+
+      window.addEventListener('resize', onWindowResize);
+      animate();
+    }
+
+    function createBackground() {
+      const bgGeo = new THREE.BufferGeometry();
+      const bgPos = [];
+      const bgColors = [];
+      for(let i=0; i<3000; i++) {
+        bgPos.push((Math.random() - 0.5) * 2000);
+        bgPos.push((Math.random() - 0.5) * 2000);
+        bgPos.push((Math.random() - 0.5) * 2000 - 500); // 往深處推
+        
+        let c = new THREE.Color().setHSL(Math.random(), 0.8, 0.5);
+        bgColors.push(c.r, c.g, c.b);
+      }
+      bgGeo.setAttribute('position', new THREE.Float32BufferAttribute(bgPos, 3));
+      bgGeo.setAttribute('color', new THREE.Float32BufferAttribute(bgColors, 3));
+      
+      const bgMat = new THREE.PointsMaterial({ size: 2, vertexColors: true, transparent: true, opacity: 0.4 });
+      bgParticleSystem = new THREE.Points(bgGeo, bgMat);
+      scene.add(bgParticleSystem);
+    }
+
+    // --- 預先計算四種幾何形態，用於無縫變形 (Morphing) ---
+    function initParticleShapes() {
+      posNebula = new Float32Array(particleCount * 3);
+      posFireworks = new Float32Array(particleCount * 3);
+      posSaturn = new Float32Array(particleCount * 3);
+      posBlackhole = new Float32Array(particleCount * 3);
+      posHelix = new Float32Array(particleCount * 3);
+      posCube = new Float32Array(particleCount * 3);
+      
+      const geometry = new THREE.BufferGeometry();
+      const initialPositions = new Float32Array(particleCount * 3);
+      const colors = [];
+      const color = new THREE.Color();
+
+      for (let i = 0; i < particleCount; i++) {
+        let idx = i * 3;
+
+        // 1. 星雲 (Nebula) -> 改為具象的「四臂螺旋星系」
+        let arm = i % 4; // 4 條旋臂
+        let r_nebula = Math.pow(Math.random(), 2) * 250; // 粒子集中於星系中心
+        let theta_nebula = r_nebula * 0.03 + arm * (Math.PI / 2) + (Math.random() * 0.3); // 螺旋角度 + 雜訊
+        posNebula[idx] = r_nebula * Math.cos(theta_nebula);
+        posNebula[idx+1] = (Math.random() - 0.5) * (3000 / (r_nebula + 20)); // 中心凸起，邊緣扁平
+        posNebula[idx+2] = r_nebula * Math.sin(theta_nebula);
+        
+        // 2. 土星 (Saturn) -> 強化環與球體的對比
+        if (Math.random() > 0.5) {
+          let r_saturn = 60 * Math.cbrt(Math.random()); // 縮小本體球
+          let theta_saturn = Math.random() * 2 * Math.PI;
+          let phi_saturn = Math.acos(2 * Math.random() - 1);
+          posSaturn[idx] = r_saturn * Math.sin(phi_saturn) * Math.cos(theta_saturn);
+          posSaturn[idx+1] = r_saturn * Math.sin(phi_saturn) * Math.sin(theta_saturn);
+          posSaturn[idx+2] = r_saturn * Math.cos(phi_saturn);
+        } else {
+          let r_saturn = 100 + Math.random() * 80; // 區隔出明顯的星環
+          let theta_saturn = Math.random() * 2 * Math.PI;
+          posSaturn[idx] = r_saturn * Math.cos(theta_saturn);
+          posSaturn[idx+1] = (Math.random() - 0.5) * 4; // 星環變得非常薄
+          posSaturn[idx+2] = r_saturn * Math.sin(theta_saturn);
+        }
+
+        // 3. 煙花 (Fireworks) -> 改為「放射狀星芒/海膽」
+        let rayIdx = i % 120; // 將粒子分配在 120 條放射光束上
+        // 費氏球面 (Fibonacci sphere) 算法確保射線均勻散佈於 3D 空間
+        let phi_fw = Math.acos(1 - 2 * (rayIdx + 0.5) / 120);
+        let theta_fw = Math.PI * (1 + Math.sqrt(5)) * rayIdx;
+        let r_fw = Math.pow(Math.random(), 0.8) * 200; // 粒子沿著射線分佈
+        posFireworks[idx] = r_fw * Math.sin(phi_fw) * Math.cos(theta_fw) + (Math.random()-0.5)*4;
+        posFireworks[idx+1] = r_fw * Math.sin(phi_fw) * Math.sin(theta_fw) + (Math.random()-0.5)*4;
+        posFireworks[idx+2] = r_fw * Math.cos(phi_fw) + (Math.random()-0.5)*4;
+
+        // 4. 黑洞 (Blackhole) -> 改為「重力漏斗」形狀
+        let r_bh = 15 + Math.pow(Math.random(), 2) * 350; 
+        let theta_bh = Math.random() * 2 * Math.PI;
+        let funnelY = -2000 / (r_bh + 10) + 10; // 越靠近中心越往下凹 (形成深淵)
+        posBlackhole[idx] = r_bh * Math.cos(theta_bh);
+        posBlackhole[idx+1] = funnelY + (Math.random() - 0.5) * (r_bh * 0.05); 
+        posBlackhole[idx+2] = r_bh * Math.sin(theta_bh);
+
+        // 5. DNA 雙螺旋 (Double Helix) -> 生物與先天的象徵
+        let t_helix = (i / particleCount) * Math.PI * 24; // 12 圈
+        let r_helix = 90;
+        let strand = (i % 2 === 0) ? 0 : Math.PI; // 兩條螺旋相差 180 度
+        let noise_h = (Math.random() - 0.5) * 15;
+        
+        if (i % 30 === 0) { // 繪製中間相連的階梯 (基因鍵)
+            let rungT = Math.floor(t_helix / (Math.PI/2)) * (Math.PI/2);
+            let lerp = Math.random();
+            posHelix[idx] = r_helix * Math.cos(rungT) * lerp + r_helix * Math.cos(rungT + Math.PI) * (1-lerp) + (Math.random()-0.5)*5;
+            posHelix[idx+1] = (rungT - Math.PI * 12) * 15 + (Math.random()-0.5)*5;
+            posHelix[idx+2] = r_helix * Math.sin(rungT) * lerp + r_helix * Math.sin(rungT + Math.PI) * (1-lerp) + (Math.random()-0.5)*5;
+        } else {
+            posHelix[idx] = r_helix * Math.cos(t_helix + strand) + noise_h;
+            posHelix[idx+1] = (t_helix - Math.PI * 12) * 15 + noise_h; // Y 軸拉長
+            posHelix[idx+2] = r_helix * Math.sin(t_helix + strand) + noise_h;
+        }
+
+        // 6. 數據方塊 (Data Cube) -> 認知與知識搭建的象徵
+        let cubeSize = 250;
+        let half = cubeSize / 2;
+        let type = Math.random();
+        
+        if (type > 0.4) {
+            // 60% 粒子集中在 12 條邊緣，形成發光線框
+            let edge = i % 12;
+            let t = (Math.random() - 0.5) * cubeSize;
+            let x, y, z;
+            if(edge===0) { x=t; y=half; z=half; } else if(edge===1) { x=t; y=half; z=-half; } else if(edge===2) { x=t; y=-half; z=half; } else if(edge===3) { x=t; y=-half; z=-half; }
+            else if(edge===4) { x=half; y=t; z=half; } else if(edge===5) { x=half; y=t; z=-half; } else if(edge===6) { x=-half; y=t; z=half; } else if(edge===7) { x=-half; y=t; z=-half; }
+            else if(edge===8) { x=half; y=half; z=t; } else if(edge===9) { x=half; y=-half; z=t; } else if(edge===10){ x=-half; y=half; z=t; } else { x=-half; y=-half; z=t; }
+            posCube[idx] = x + (Math.random()-0.5)*15; posCube[idx+1] = y + (Math.random()-0.5)*15; posCube[idx+2] = z + (Math.random()-0.5)*15;
+        } else if (type > 0.1) {
+            // 30% 粒子散佈在 6 個面上 (半透明面)
+            let face = i % 6;
+            let u = (Math.random() - 0.5) * cubeSize; let v = (Math.random() - 0.5) * cubeSize;
+            if(face===0) { posCube[idx]=half; posCube[idx+1]=u; posCube[idx+2]=v; } else if(face===1) { posCube[idx]=-half; posCube[idx+1]=u; posCube[idx+2]=v; }
+            else if(face===2) { posCube[idx]=u; posCube[idx+1]=half; posCube[idx+2]=v; } else if(face===3) { posCube[idx]=u; posCube[idx+1]=-half; posCube[idx+2]=v; }
+            else if(face===4) { posCube[idx]=u; posCube[idx+1]=v; posCube[idx+2]=half; } else { posCube[idx]=u; posCube[idx+1]=v; posCube[idx+2]=-half; }
+        } else {
+            // 10% 粒子散佈在方塊內部，營造雜訊感
+            posCube[idx] = (Math.random() - 0.5) * cubeSize;
+            posCube[idx+1] = (Math.random() - 0.5) * cubeSize;
+            posCube[idx+2] = (Math.random() - 0.5) * cubeSize;
+        }
+
+        // 初始位置設為星雲
+        initialPositions[idx] = posNebula[idx];
+        initialPositions[idx+1] = posNebula[idx+1];
+        initialPositions[idx+2] = posNebula[idx+2];
+        
+        // 給予五彩斑斕的頂點顏色擾動
+        color.setHSL((i / particleCount) * 0.5 + 0.5, 0.8, 0.6);
+        colors.push(color.r, color.g, color.b);
+      }
+
+      geometry.setAttribute('position', new THREE.BufferAttribute(initialPositions, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+      const material = new THREE.PointsMaterial({
+        size: 1.5, // 縮小單一粒子尺寸，讓整體輪廓更銳利清晰
+        color: baseColor,
+        vertexColors: true,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0.8,
+        depthWrite: false
+      });
+
+      particleSystem = new THREE.Points(geometry, material);
+      scene.add(particleSystem);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      // --- 新增：鏡頭緩慢拉近拉遠的呼吸感 ---
+      // 0.0005 控制呼吸速度 (越小越慢)，40 控制拉近拉遠的幅度
+      camera.position.z = 400 + Math.sin(Date.now() * 0.0005) * 40;
+
+      // 物理平滑過渡 (Lerp)
+      currentRotation.x += (targetRotation.x - currentRotation.x) * 0.1;
+      currentRotation.y += (targetRotation.y - currentRotation.y) * 0.1;
+      currentScale += (targetScale - currentScale) * 0.15;
+
+      // --- 新增：音樂節奏跳動邏輯 ---
+      if (isAudioVizInitialized && analyser && !bgMusic.paused) {
+        analyser.getByteFrequencyData(dataArray);
+        // 取低音頻段 (前 10 個數據) 計算平均值 (抓取重低音 Bass)
+        let bassSum = 0;
+        for (let i = 0; i < 10; i++) {
+          bassSum += dataArray[i];
+        }
+        let bassAvg = bassSum / 10; // 數值在 0 ~ 255 之間
+        
+        // 將低音數值映射至縮放比例 (節奏強時模型放大)
+        let targetAudioScale = 1.0 + (bassAvg / 255) * 0.4;
+        audioScale += (targetAudioScale - audioScale) * 0.3; // 使用 Lerp 讓跳動更平滑
+
+        // 動態調整 Bloom (輝光) 強度，讓節奏爆發時畫面更亮
+        if (bloomPass) {
+          bloomPass.strength = 1.5 + (bassAvg / 255) * 2.0; // 降低隨音樂爆發的極限值
+        }
+      } else {
+        // 音樂暫停或未初始化時，平滑恢復原本大小與亮度
+        audioScale += (1.0 - audioScale) * 0.1;
+        if (bloomPass) bloomPass.strength += (1.5 - bloomPass.strength) * 0.1;
+      }
+
+      if (particleSystem) {
+        particleSystem.rotation.x = currentRotation.x;
+        particleSystem.rotation.y = currentRotation.y;
+        
+        let finalScale = currentScale * audioScale;
+        particleSystem.scale.set(finalScale, finalScale, finalScale);
+        
+        // 要求3：根據旋轉角度改變整體色相
+        let rotHue = (Math.abs(currentRotation.y) / (Math.PI * 2)) % 1.0;
+        let baseHSL = {};
+        baseColor.getHSL(baseHSL);
+        particleSystem.material.color.setHSL((baseHSL.h + rotHue) % 1.0, 1.0, 0.5);
+        
+        // --- 核心：黑洞螺旋物理更新 ---
+        for (let i = 0; i < particleCount; i++) {
+          let idx = i * 3;
+          let x = posBlackhole[idx], y = posBlackhole[idx+1], z = posBlackhole[idx+2];
+          let dist = Math.sqrt(x * x + z * z);
+          let angle = Math.atan2(z, x);
+          
+          dist -= 1.5; // 向內吸入
+          angle += 0.02 + (20 / Math.max(dist, 1)); // 越靠近中心轉越快
+          
+          // 重新計算 y 軸漏斗高度並平滑下墜
+          let funnelY = -2000 / (dist + 10) + 10;
+          y += (funnelY - y) * 0.1;
+          
+          if (dist < 5 || y < -150) { // 掉入視界深淵後重生
+            dist = 300 + Math.random() * 50;
+            angle = Math.random() * Math.PI * 2;
+            y = (Math.random() - 0.5) * 10;
+          }
+          posBlackhole[idx] = dist * Math.cos(angle);
+          posBlackhole[idx+1] = y;
+          posBlackhole[idx+2] = dist * Math.sin(angle);
+        }
+        
+        // --- 核心：根據旋轉角度無縫變換(Morph)四種形狀 ---
+        // 將 currentRotation.y (約 -PI 到 PI) 映射為 0 到 6 的連續數值 (因有 6 種形狀)
+        let mappedRot = ((currentRotation.y + Math.PI) / (Math.PI * 2)) * 6.0;
+        mappedRot = (mappedRot % 6.0 + 6.0) % 6.0; // 確保在 0~6 迴圈
+        
+        let idx1 = Math.floor(mappedRot);
+        let idx2 = (idx1 + 1) % 6;
+        let blend = mappedRot - idx1;
+        
+        // 加入 Smoothstep 讓過渡更柔和
+        blend = blend * blend * (3 - 2 * blend); 
+
+        const shapes = [posNebula, posSaturn, posFireworks, posBlackhole, posHelix, posCube];
+        const s1 = shapes[idx1];
+        const s2 = shapes[idx2];
+        const currentPos = particleSystem.geometry.attributes.position.array;
+
+        // CPU 頂點差值混合
+        for (let i = 0; i < particleCount * 3; i++) {
+            currentPos[i] = s1[i] + (s2[i] - s1[i]) * blend;
+        }
+        particleSystem.geometry.attributes.position.needsUpdate = true; // 告知 GPU 更新畫面
+      }
+      
+      bgParticleSystem.rotation.y -= 0.0005; // 背景緩慢自轉
+
+      composer.render();
+    }
+
+    initThreeJS();
+
+    // --- MediaPipe Hands 初始化與介接 ---
+    const videoElement = document.getElementById('input-video');
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 0, // 將模型複雜度降為 0，大幅減輕手機負擔並提升幀率(FPS)
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults((results) => {
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        
+        // 要求1：計算手掌中心位置，控制旋轉
+        // 使用手腕(0)與中指根部(9)的中點代表整體手部位置
+        let centerX = (landmarks[0].x + landmarks[9].x) / 2;
+        let centerY = (landmarks[0].y + landmarks[9].y) / 2;
+        
+        // 映射到旋轉角度 (X軸對應上下，Y軸對應左右)
+        targetRotation.y = (centerX - 0.5) * Math.PI * 2;
+        targetRotation.x = (centerY - 0.5) * Math.PI;
+        
+        // 要求1：計算食指尖(8)與拇指尖(4)的距離，控制擴散與收縮 (Pinch)
+        let dx = landmarks[8].x - landmarks[4].x;
+        let dy = landmarks[8].y - landmarks[4].y;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+        let isPinching = dist < 0.08; // 放寬捏合判定的距離，比較好觸發
+        
+        // --- 新增：更新虛擬游標 ---
+        // 注意視訊是鏡像的，所以 X 軸要反轉
+        let screenX = (1.0 - centerX) * window.innerWidth;
+        let screenY = centerY * window.innerHeight;
+        cursor.style.left = screenX + 'px';
+        cursor.style.top = screenY + 'px';
+        if (isPinching) cursor.classList.add('pinching'); else cursor.classList.remove('pinching');
+
+        // --- 新增：手勢退出按鈕邏輯 ---
+        let rect = btnExit.getBoundingClientRect();
+        // 稍微放大判定範圍 (+20px)，容許手部微小抖動
+        if (screenX > rect.left - 20 && screenX < rect.right + 20 && screenY > rect.top - 20 && screenY < rect.bottom + 20) {
+            if (isPinching) {
+                exitTimer++;
+                if (exitTimer >= 40) window.location.href = 'index.html?from=level4'; // 返回主選單並附帶通關參數
+            } else {
+                exitTimer = Math.max(0, exitTimer - 1); // 減少誤判掉進度的懲罰
+            }
+        } else {
+            exitTimer = Math.max(0, exitTimer - 2);
+        }
+        exitBar.style.width = Math.min(100, (exitTimer / 40) * 100) + '%';
+        
+        // 距離越大，模型越大 (收縮/擴散)
+        // dist 通常在 0.02 (捏合) 到 0.25 (大張開) 之間
+        targetScale = Math.max(0.2, Math.min(2.5, dist * 6.0));
+      } else {
+        // 沒偵測到手時，緩慢恢復預設大小並讓它自動旋轉
+        targetScale = 1.0;
+        targetRotation.y += 0.005;
+        cursor.classList.remove('pinching');
+        exitTimer = Math.max(0, exitTimer - 2);
+        exitBar.style.width = Math.min(100, (exitTimer / 40) * 100) + '%';
+      }
+    });
+
+    const cameraUtils = new Camera(videoElement, {
+      onFrame: async () => { await hands.send({image: videoElement}); },
+      width: 640, height: 480
+    });
+    cameraUtils.start();
+
+  </script>
+</body>
+</html>
